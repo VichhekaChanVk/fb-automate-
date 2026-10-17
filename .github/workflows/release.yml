@@ -24,7 +24,8 @@ jobs:
           name="fb-automate-${GITHUB_REF_NAME}"
           mkdir "$name"
           cp -r fb_scheduler bulk_download.py README.md "$name"/
-          find "$name" -name '*.db' -delete -o -name '__pycache__' -prune -exec rm -rf {} +
+          find "$name" -name '*.db' -delete
+          find "$name" -type d -name '__pycache__' -prune -exec rm -rf {} +
           zip -r "$name.zip" "$name"
       - uses: softprops/action-gh-release@v2
         with:
