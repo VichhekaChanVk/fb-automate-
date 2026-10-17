@@ -28,6 +28,25 @@ Open http://127.0.0.1:5000. Set `PORT` to use another port.
 3. In **Graph API Explorer**, select your app and **User Token**, add those permissions, click **Generate Access Token**, and tick your Pages.
 4. Extend the token in the **Access Token Debugger** ("Extend Access Token"), then paste it into **Import my Pages**. Page tokens made from an extended user token do not expire.
 
+## Video downloader + editor (`bulk_download.py`)
+
+Command-line tool with two modes:
+
+- `download`: download every video from a profile/channel/playlist link (any site [yt-dlp](https://github.com/yt-dlp/yt-dlp) supports), then optionally speed up and mirror each one.
+- `edit`: speed up and/or mirror videos already on disk (files or folders, searched recursively).
+
+Editing uses ffmpeg with NVIDIA NVENC when available and falls back to CPU. Edited files are saved as `<name>.edited.mp4`, and the original is deleted after a successful edit unless you pass `--keep-original`.
+
+```bash
+pip install -U yt-dlp      # needs ffmpeg on PATH
+python bulk_download.py                                  # menu
+python bulk_download.py download URL --speed 1.5         # download + edit
+python bulk_download.py download URL --no-edit           # plain download
+python bulk_download.py edit D:\Videos --no-flip         # edit local files
+```
+
+Run `python bulk_download.py download -h` or `edit -h` for every option.
+
 ## Notes
 
 - The app must stay running (PC on) for scheduled posts to go out.
