@@ -1,0 +1,21 @@
+# Local database: contains Facebook Page access tokens. Never commit.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Secrets / local config
+.env
+cookies.txt
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
