@@ -26,6 +26,14 @@ def test_dashboard_and_live_queue_render(client):
     assert "<html" not in frag and "Queue" in frag
 
 
+def test_times_use_12_hour_clock(app_mod):
+    from datetime import datetime
+    assert app_mod.fmt_ts(datetime(2026, 10, 18, 15, 52).timestamp()) == "Oct 18, 2026 3:52 PM"
+    assert app_mod.fmt_ts(datetime(2026, 10, 18, 0, 5).timestamp()) == "Oct 18, 2026 12:05 AM"
+    assert app_mod.fmt_ts(datetime(2026, 10, 18, 12, 0).timestamp()) == "Oct 18, 2026 12:00 PM"
+    assert app_mod.fmt_ts(None) == ""
+
+
 # ---------------------------------------------------------------- duplicates
 
 def test_fingerprint_matches_renamed_copy(app_mod, videos):

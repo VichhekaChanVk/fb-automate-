@@ -268,7 +268,12 @@ def parse_local(dt_str):
 
 @app.template_filter("ts")
 def fmt_ts(ts):
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else ""
+    """12-hour time, e.g. 'Oct 18, 2026 3:52 PM'."""
+    if not ts:
+        return ""
+    d = datetime.fromtimestamp(ts)
+    hour = d.hour % 12 or 12
+    return f"{d:%b} {d.day}, {d.year} {hour}:{d:%M} {d:%p}"
 
 
 # ---------------------------------------------------------------- routes
