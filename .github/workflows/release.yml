@@ -1,0 +1,32 @@
+name: Release
+
+# Push a tag like v1.0.0 to test, package, and publish a GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: pytest -q
+      - name: Package
+        run: |
+          name="fb-automate-${GITHUB_REF_NAME}"
+          mkdir "$name"
+          cp -r fb_scheduler bulk_download.py README.md "$name"/
+          find "$name" -name '*.db' -delete -o -name '__pycache__' -prune -exec rm -rf {} +
+          zip -r "$name.zip" "$name"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: fb-automate-${{ github.ref_name }}.zip
+          generate_release_notes: true

@@ -1,5 +1,7 @@
 # fb-automate
 
+[![CI](https://github.com/VichhekaChanVk/fb-automate-/actions/workflows/ci.yml/badge.svg)](https://github.com/VichhekaChanVk/fb-automate-/actions/workflows/ci.yml)
+
 Local dashboard that queues and auto-publishes posts to the Facebook Pages you manage, through Meta's official Graph API.
 
 ## Features
@@ -46,6 +48,22 @@ python bulk_download.py edit D:\Videos --no-flip         # edit local files
 ```
 
 Run `python bulk_download.py download -h` or `edit -h` for every option.
+
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+pytest
+```
+
+- **CI** (`.github/workflows/ci.yml`): every push and pull request runs lint and tests on Ubuntu and Windows (Python 3.11 and 3.12), plus a gitleaks secret scan that fails if a token is committed.
+- **Release** (`.github/workflows/release.yml`): push a tag like `v1.0.0` to re-run the checks, build `fb-automate-v1.0.0.zip`, and publish it as a GitHub Release.
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
 
 ## Notes
 

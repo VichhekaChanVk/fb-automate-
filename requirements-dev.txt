@@ -1,0 +1,3 @@
+-r fb_scheduler/requirements.txt
+pytest
+ruff
