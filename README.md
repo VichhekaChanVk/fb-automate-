@@ -10,7 +10,9 @@ Local dashboard that queues and auto-publishes posts to the Facebook Pages you m
 - Bulk-schedule a folder of videos/photos with a fixed gap between posts
 - Captions from a default text, a CSV (`filename,caption`), or a `.txt` file next to each video
 - Single posts: video, photo, text, or link
-- Live queue view (updates every 3 s) with retry and delete
+- Calendar dashboard: week view with video thumbnails, color per Page, stat cards (today's progress, next post, queued, published, followers, engagement), and a detail panel to preview, edit, post now, retry, or delete
+- Queue tools: re-space the whole queue to a new start time and gap, or delete all queued posts
+- Live queue list (updates every 3 s) with retry and delete
 - Duplicate protection: the same video (matched by file content, not name) is never posted twice to the same Page
 - Survives restarts: the queue is saved in SQLite, and missed posts resume from now with the same gaps
 

@@ -3,7 +3,7 @@ import time
 
 
 def flash_text(resp):
-    return " | ".join(re.findall(r'class="flash \w+">([^<]*)', resp.get_data(as_text=True)))
+    return " | ".join(re.findall(r'class="toast[^"]*">([^<]*)</div>', resp.get_data(as_text=True)))
 
 
 def rows(app_mod, where="1=1"):
