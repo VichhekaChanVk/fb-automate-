@@ -43,6 +43,7 @@ DB_PATH = Path(__file__).with_name("posts.db")
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 WORKER_TICK = 15  # seconds between queue checks
+TOKEN_DEAD = "(code 190)"  # Graph API: access token expired, revoked, or logged out
 
 app = Flask(__name__)
 app.secret_key = "local-only"
@@ -54,6 +55,20 @@ def db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def shift_missed(c, page_ids=None):
+    """Posts whose time already passed (app off, or Page paused): push that Page's queue
+    forward so it resumes from now with the same gaps, instead of firing them all at once."""
+    now = time.time()
+    rows = c.execute("SELECT page_id, MIN(run_at) AS first FROM posts WHERE status='queued' "
+                     "GROUP BY page_id HAVING first < ?", (now - 60,)).fetchall()
+    for r in rows:
+        if page_ids is not None and r["page_id"] not in page_ids:
+            continue
+        c.execute("UPDATE posts SET run_at = run_at + ? WHERE page_id=? AND status='queued'",
+                  (now - r["first"], r["page_id"]))
+        print(f"[resume] Page {r['page_id']}: missed posts moved forward {(now - r['first']) / 3600:.1f} h")
 
 
 def init_db():
@@ -75,18 +90,14 @@ def init_db():
         # not be live on Facebook, so flag it instead of silently re-posting.
         c.execute("UPDATE posts SET status='failed', result='Interrupted: check the Page, then Retry if missing' "
                   "WHERE status='posting'")
-        # App was off past some post times: push each Page's queue forward so it resumes
-        # from now with the same gaps, instead of firing all missed posts at once.
-        now = time.time()
-        for r in c.execute("SELECT page_id, MIN(run_at) AS first FROM posts WHERE status='queued' "
-                           "GROUP BY page_id HAVING first < ?", (now - 60,)).fetchall():
-            c.execute("UPDATE posts SET run_at = run_at + ? WHERE page_id=? AND status='queued'",
-                      (now - r["first"], r["page_id"]))
-            print(f"[startup] Page {r['page_id']}: missed posts moved forward {(now - r['first']) / 3600:.1f} h")
+        shift_missed(c)
         # Older databases: add the fingerprint column and fill it for files still on disk.
         cols = {r["name"] for r in c.execute("PRAGMA table_info(posts)")}
         if "file_hash" not in cols:
             c.execute("ALTER TABLE posts ADD COLUMN file_hash TEXT")
+        if "token_error" not in {r["name"] for r in c.execute("PRAGMA table_info(pages)")}:
+            # Set when Facebook rejects a Page's token; that Page's queue pauses until re-import.
+            c.execute("ALTER TABLE pages ADD COLUMN token_error TEXT")
         for row in c.execute("SELECT id, path FROM posts WHERE path IS NOT NULL AND file_hash IS NULL").fetchall():
             if Path(row["path"]).is_file():
                 c.execute("UPDATE posts SET file_hash=? WHERE id=?", (fingerprint(row["path"]), row["id"]))
@@ -207,7 +218,8 @@ def worker():
             with db() as c:
                 row = c.execute(
                     "SELECT p.*, pg.token FROM posts p JOIN pages pg ON pg.id = p.page_id "
-                    "WHERE p.status='queued' AND p.run_at <= ? ORDER BY p.run_at LIMIT 1",
+                    "WHERE p.status='queued' AND p.run_at <= ? AND pg.token_error IS NULL "
+                    "ORDER BY p.run_at LIMIT 1",
                     (time.time(),)).fetchone()
                 if row:
                     # Last check before upload: same file already live on this Page?
@@ -228,6 +240,13 @@ def worker():
             except Exception as e:  # network, file, or API error
                 status, result = "failed", str(e)
             with db() as c:
+                if status == "failed" and TOKEN_DEAD in result:
+                    # Token expired or revoked: every post for this Page would fail the same way.
+                    # Pause the Page and keep this post queued; re-importing a token resumes it.
+                    c.execute("UPDATE pages SET token_error=? WHERE id=?", (result, row["page_id"]))
+                    c.execute("UPDATE posts SET status='queued', result=NULL WHERE id=?", (row["id"],))
+                    print(f"[worker] Page {row['page_id']} paused, token rejected: {result}")
+                    continue
                 c.execute("UPDATE posts SET status=?, result=?, posted_at=? WHERE id=?",
                           (status, result, time.time(), row["id"]))
             print(f"[worker] post {row['id']} -> {status}: {result}")
@@ -319,8 +338,10 @@ def pages_import():
         return redirect(url_for("index"))
     with db() as c:
         for p in found:
+            # REPLACE also clears token_error, so a paused Page starts posting again.
             c.execute("INSERT OR REPLACE INTO pages(id, name, token) VALUES (?,?,?)",
                       (p["id"], p["name"], p["access_token"]))
+        shift_missed(c, {p["id"] for p in found})
     flash(f"Imported {len(found)} Page(s).", "ok")
     return redirect(url_for("index"))
 
@@ -331,6 +352,7 @@ def pages_add():
     with db() as c:
         c.execute("INSERT OR REPLACE INTO pages(id, name, token) VALUES (?,?,?)",
                   (f["page_id"].strip(), f["name"].strip() or f["page_id"].strip(), f["token"].strip()))
+        shift_missed(c, {f["page_id"].strip()})
     flash("Page saved.", "ok")
     return redirect(url_for("index"))
 
@@ -504,7 +526,7 @@ def api_state():
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     day0, day1 = today.timestamp(), (today + timedelta(days=1)).timestamp()
     with db() as c:
-        pages = [dict(r) for r in c.execute("SELECT id, name FROM pages ORDER BY name")]
+        pages = [dict(r) for r in c.execute("SELECT id, name, token_error FROM pages ORDER BY name")]
         posts = [post_dict(r) for r in c.execute(
             "SELECT p.*, pg.name AS page_name FROM posts p LEFT JOIN pages pg ON pg.id=p.page_id "
             "WHERE p.run_at >= ? AND p.run_at < ? ORDER BY p.run_at, p.id", (start, end))]
@@ -586,6 +608,20 @@ def api_reschedule():
             c.execute("UPDATE posts SET run_at=? WHERE id=?", (start + n * gap, r["id"]))
             slot[r["page_id"]] = n + 1
     return jsonify(ok=True, moved=len(rows))
+
+
+@app.post("/api/queue/retry_failed")
+def api_retry_failed():
+    """Re-queue failed posts at their original times, then slide the Page's queue so they
+    go out from now on with the same gaps (instead of all at once)."""
+    page_id = (request.get_json(silent=True) or {}).get("page_id")
+    with db() as c:
+        ids = {r[0] for r in c.execute("SELECT DISTINCT page_id FROM posts WHERE status='failed'"
+                                       + (" AND page_id=?" if page_id else ""), (page_id,) if page_id else ())}
+        n = c.execute("UPDATE posts SET status='queued', result=NULL WHERE status='failed'"
+                      + (" AND page_id=?" if page_id else ""), (page_id,) if page_id else ()).rowcount
+        shift_missed(c, ids)
+    return jsonify(ok=True, retried=n)
 
 
 @app.post("/api/queue/clear")
@@ -824,6 +860,10 @@ main{min-width:0;padding:24px 28px 48px}
 .st-failed{background:var(--err-soft);color:var(--err)}.st-posting{background:var(--warn-soft);color:var(--warn)}
 .st-skipped{background:var(--surface-3);color:var(--muted)}
 .media .status{position:absolute;top:8px;right:8px;box-shadow:var(--shadow-1)}
+.alert{display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;background:var(--err-soft);color:var(--text);border:1px solid var(--err);
+ border-radius:var(--r-md);padding:12px 16px;margin-bottom:12px}
+.alert>svg{color:var(--err);margin-top:2px}.alert .msg{flex:1;min-width:220px}.alert .msg b{display:block}
+.alert .msg small{color:var(--text-2);overflow-wrap:anywhere}.alert.warn{background:var(--warn-soft);border-color:var(--warn)}.alert.warn>svg{color:var(--warn)}
 .empty-day{margin:10px;border:1px dashed var(--border-strong);border-radius:var(--r-md);padding:18px 8px;text-align:center;color:var(--muted);font-size:12px}
 .more{font-size:12px;color:var(--muted);text-align:center;padding:2px 0 8px}
 .skel{background:linear-gradient(90deg,var(--surface-2),var(--surface-3),var(--surface-2));background-size:200% 100%;animation:shimmer 1.2s infinite;border-radius:var(--r-md)}
@@ -959,6 +999,7 @@ th{font-size:12px;color:var(--muted);font-weight:600;text-transform:uppercase;le
     <span class="range num" id="range" aria-live="polite"></span>
     <a class="btn primary" href="#create"><svg class="i" aria-hidden="true"><use href="#i-plus"/></svg>New posts</a>
    </div>
+   <div id="alerts" role="status"></div>
    <div class="stats" id="stats" aria-label="Summary">
     <div class="stat skel" style="height:96px"></div><div class="stat skel" style="height:96px"></div>
     <div class="stat skel" style="height:96px"></div><div class="stat skel" style="height:96px"></div>
@@ -1037,7 +1078,7 @@ th{font-size:12px;color:var(--muted);font-weight:600;text-transform:uppercase;le
      <div class="plist">
       {% for p in pages %}
       <div class="prow"><span class="avatar" data-page="{{ p.id }}">{{ p.name[:1] }}</span>
-       <div class="info"><div class="nm">{{ p.name }}</div><div class="sub num"><span data-followers="{{ p.id }}">—</span> · ID {{ p.id }}</div></div>
+       <div class="info"><div class="nm">{{ p.name }} <span class="status st-failed" data-paused="{{ p.id }}" hidden>Paused · token expired</span></div><div class="sub num"><span data-followers="{{ p.id }}">—</span> · ID {{ p.id }}</div></div>
        <form class="inline" method="post" action="{{ url_for('pages_delete', page_id=p.id) }}"
         onsubmit="return confirm('Remove {{ p.name }}? Its queued posts are deleted too.')"><button class="btn danger" type="submit">Remove</button></form></div>
       {% else %}<div class="empty">No Pages yet. Import them with a token.</div>{% endfor %}
@@ -1154,7 +1195,7 @@ th{font-size:12px;color:var(--muted);font-weight:600;text-transform:uppercase;le
       state = await r.json();
       $("#conn").classList.remove("off"); $("#conn-t").textContent = `Live · ${new Date().toLocaleTimeString("en-US", {hour: "numeric", minute: "2-digit"})}`;
       $("#nav-queued").textContent = state.counts.queued || "";
-      renderStats(); renderFilters(); renderWeek(); paintPages();
+      renderAlerts(); renderStats(); renderFilters(); renderWeek(); paintPages();
       if (openId) refreshDrawer();
     } catch (e) {
       $("#conn").classList.add("off"); $("#conn-t").textContent = "Offline · retrying";
@@ -1199,6 +1240,26 @@ th{font-size:12px;color:var(--muted);font-weight:600;text-transform:uppercase;le
         !insights ? "Loading insights…" : ok ? `Across ${insights.pages.length} Page${insights.pages.length > 1 ? "s" : ""}` : "Insights unavailable · hover for why", why),
       stat(tile("heart", "t-rose"), "Engagement", ok ? fmtN(insights.reactions + insights.comments) : "—",
         ok ? `${fmtN(insights.reactions)} reactions · ${fmtN(insights.comments)} comments` : "Recent 20 posts", why));
+  }
+
+  /* ---------- alerts ---------- */
+  async function retryFailed(btn) {
+    btn.disabled = true;
+    const d = await api("/api/queue/retry_failed", {}, r => `Re-queued ${r.retried} failed post${r.retried === 1 ? "" : "s"}.`);
+    btn.disabled = false; if (d) load();
+  }
+  function renderAlerts() {
+    const out = state.pages.filter(p => p.token_error).map(p => h("div", {class: "alert"}, icon("alert"),
+      h("div", {class: "msg"}, h("b", {}, `${p.name} is paused: its Facebook token stopped working`),
+        h("small", {}, `Posts stay scheduled. Import a new extended token to resume. Facebook said: ${p.token_error}`)),
+      h("a", {class: "btn", href: "#pages"}, "Re-import token")));
+    const failed = state.counts.failed || 0;
+    if (failed) out.push(h("div", {class: "alert warn"}, icon("alert"),
+      h("div", {class: "msg"}, h("b", {}, `${failed} post${failed === 1 ? "" : "s"} failed`),
+        h("small", {}, "Fix the cause first (for an expired token, re-import it), then retry. They go out from now with the same gaps.")),
+      h("button", {class: "btn", type: "button", onclick: e => retryFailed(e.currentTarget)}, icon("refresh", "i-sm"), "Retry all failed")));
+    $("#alerts").replaceChildren(...out);
+    $$("[data-paused]").forEach(el => { el.hidden = !pageOf(el.dataset.paused).token_error; });
   }
 
   /* ---------- filters ---------- */

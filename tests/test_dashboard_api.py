@@ -67,6 +67,64 @@ def test_clear_queue_keeps_history(client, app_mod):
         assert c.execute("SELECT status FROM posts").fetchall()[0][0] == "done"
 
 
+def run_worker_once(app_mod, monkeypatch, publish):
+    monkeypatch.setattr(app_mod, "publish", publish)
+    monkeypatch.setattr(app_mod.time, "sleep", lambda _: (_ for _ in ()).throw(KeyboardInterrupt))
+    try:
+        app_mod.worker()
+    except KeyboardInterrupt:
+        pass
+
+
+def test_dead_token_pauses_page_instead_of_failing(client, app_mod, monkeypatch):
+    first = add_post(app_mod, run_at=time.time() - 10)
+    add_post(app_mod, run_at=time.time() - 5)
+    other = add_post(app_mod, page_id="B", run_at=time.time() - 1)
+    sent = []
+
+    def publish(post, token):
+        if post["page_id"] == "A":
+            raise RuntimeError("Error validating access token: Session has expired (code 190)")
+        sent.append(post["id"])
+        return "fb-1"
+
+    run_worker_once(app_mod, monkeypatch, publish)
+    with app_mod.db() as c:
+        statuses = dict(c.execute("SELECT id, status FROM posts"))
+        err = c.execute("SELECT token_error FROM pages WHERE id='A'").fetchone()[0]
+    assert statuses[first] == "queued" and "failed" not in statuses.values()
+    assert "code 190" in err
+    assert sent == [other]  # the healthy Page keeps posting
+    page = [p for p in client.get("/api/state").get_json()["pages"] if p["id"] == "A"][0]
+    assert page["token_error"]
+
+
+def test_reimport_clears_pause_and_resumes_from_now(client, app_mod, monkeypatch):
+    with app_mod.db() as c:
+        c.execute("UPDATE pages SET token_error='expired (code 190)' WHERE id='A'")
+    hour = 3600
+    for t in (-10 * hour, -9 * hour, 2 * hour):
+        add_post(app_mod, run_at=time.time() + t)
+    monkeypatch.setattr(app_mod, "import_pages", lambda tok: [{"id": "A", "name": "Page A", "access_token": "new"}])
+    client.post("/pages/import", data={"user_token": "t"})
+    with app_mod.db() as c:
+        err, token = c.execute("SELECT token_error, token FROM pages WHERE id='A'").fetchone()
+        times = [r[0] for r in c.execute("SELECT run_at FROM posts WHERE page_id='A' ORDER BY run_at")]
+    assert err is None and token == "new"
+    assert abs(times[0] - time.time()) < 5
+    assert [round((t - times[0]) / hour) for t in times] == [0, 1, 12]
+
+
+def test_retry_failed_requeues_from_now(client, app_mod):
+    add_post(app_mod, status="failed", result="x", run_at=time.time() - 7200)
+    add_post(app_mod, status="failed", result="x", run_at=time.time() - 3600)
+    add_post(app_mod, status="done", run_at=time.time() - 9000)
+    assert client.post("/api/queue/retry_failed", json={}).get_json()["retried"] == 2
+    with app_mod.db() as c:
+        q = [r[0] for r in c.execute("SELECT run_at FROM posts WHERE status='queued' ORDER BY run_at")]
+    assert abs(q[0] - time.time()) < 5 and round(q[1] - q[0]) == 3600
+
+
 def test_thumb_404_for_text_post(client, app_mod):
     assert client.get(f"/thumb/{add_post(app_mod)}").status_code == 404
 
